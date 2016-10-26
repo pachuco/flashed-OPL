@@ -1,29 +1,3 @@
-//
-// Copyright (C) 2013-2016 Alexey Khokholov (Nuke.YKT)
-//
-// This program is free software; you can redistribute it and/or
-// modify it under the terms of the GNU General Public License
-// as published by the Free Software Foundation; either version 2
-// of the License, or (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-//
-//
-//  Nuked OPL3 emulator.
-//  Thanks:
-//      MAME Development Team(Jarek Burczynski, Tatsuyuki Satoh):
-//          Feedback and Rhythm part calculation information.
-//      forums.submarine.org.uk(carbon14, opl3):
-//          Tremolo and phase generator calculation information.
-//      OPLx decapsulated(Matthew Gambrell, Olli Niemitalo):
-//          OPL2 ROMs.
-//
-// version: 1.7.4
-//
-
 package nukedOPL
 {
     import flash.utils.ByteArray;
@@ -191,24 +165,98 @@ public class OPL3emu
     
     public function OPL3emu(samplerate:uint)
     {
+        logsinrom.fixed = true;
+        exprom.fixed = true;
+        mt.fixed = true;
+        kslrom.fixed = true;
+        kslshift.fixed = true;
+        eg_incstep.fixed = true;
+        eg_incdesc.fixed = true;
+        eg_incsh.fixed = true;
+        ad_slot.fixed = true;
+        ch_slot.fixed = true;
+        
         chip = new opl3_chip();
         Reset(samplerate);
     }
-    
-    
-    
-    
-    private function OPL3_EnvelopeCalcExp(level:uint):int
+
+    private function OPL3_EnvelopeUpdateKSL(slot:opl3_slot):void
     {
-        if (level > 0x1fff)
+		var channel:opl3_channel = slot.channel;
+		
+        var ksl:int = (kslrom[channel.f_num >> 6] << 2)
+                   - ((0x08 - channel.block) << 5);
+        if (ksl < 0)
         {
-            level = 0x1fff;
+            ksl = 0;
         }
-        return ((exprom[(level & 0xff) ^ 0xff] | 0x400) << 1) >> (level >> 8);
+        slot.eg_ksl = ksl & 0xFF; //int16 -> uint8
+    }
+
+    private function OPL3_EnvelopeUpdateRate(slot:opl3_slot):void
+    {
+        var reg_rate:uint;
+        switch (slot.eg_gen)
+        {
+        case envelope_gen_num_off:
+        case envelope_gen_num_attack:
+            reg_rate = slot.reg_ar;
+            break;
+        case envelope_gen_num_decay:
+            reg_rate = slot.reg_dr;
+            break;
+        case envelope_gen_num_sustain:
+        case envelope_gen_num_release:
+            reg_rate = slot.reg_rr;
+            break;
+        }
+        
+		var channel:opl3_channel = slot.channel;
+        var rate:uint;
+        if (reg_rate == 0x00)
+        {
+            slot.eg_rate = 0x00;
+        }
+        rate = (reg_rate << 2) + (slot.reg_ksr ? channel.ksv : (channel.ksv >> 2));
+        if (rate > 0x3c)
+        {
+            rate = 0x3c;
+        }
+        slot.eg_rate = rate;
     }
     
-    public function envelope_gen(slot:opl3_slot):void
+    [Inline]
+    private final function OPL3_EnvelopeCalc(slot:opl3_slot):void
     {
+        var rate_h:uint, rate_l:uint;
+        var inc:uint = 0;
+        var a:uint, b:uint, c:uint
+        
+        rate_h = slot.eg_rate >> 2;
+        rate_l = slot.eg_rate & 3;
+        var eg_incsh_rate_h:int = eg_incsh[rate_h];
+        
+        if (eg_incsh_rate_h > 0)
+        {
+            if ((chip.timer & ((1 << eg_incsh_rate_h) - 1)) == 0)
+            {
+                a = eg_incdesc[rate_h];
+                b = rate_l;
+                c = ((chip.timer) >> eg_incsh_rate_h) & 0x07;
+                inc = eg_incstep[(a<<5) + (b<<3) + c];
+            }
+        }
+        else
+        {
+            a = eg_incdesc[rate_h];
+            b = rate_l;
+            c = chip.timer & 0x07;
+            inc = eg_incstep[(a<<5) + (b<<3) + c] << (-eg_incsh_rate_h);
+        }
+        slot.eg_inc = inc;
+        slot.eg_out = slot.eg_rout + (slot.reg_tl << 2) + (slot.eg_ksl >> kslshift[slot.reg_ksl]) + slot.trem[0];
+        //envelope_gen(slot)
+        //------------------
         switch(slot.eg_gen)
         {
             case envelope_gen_num_off:
@@ -250,81 +298,7 @@ public class OPL3emu
                 slot.eg_rout += slot.eg_inc;
             break;
         }
-    }
-    
-    private function OPL3_EnvelopeCalcRate(slot:opl3_slot, reg_rate:uint):uint
-    {
-        var rate:uint;
-        if (reg_rate == 0x00)
-        {
-            return 0x00;
-        }
-        rate = (reg_rate << 2)
-             + (slot.reg_ksr ? slot.channel.ksv : (slot.channel.ksv >> 2));
-        if (rate > 0x3c)
-        {
-            rate = 0x3c;
-        }
-        return rate;
-    }
-
-    private function OPL3_EnvelopeUpdateKSL(slot:opl3_slot):void
-    {
-        var ksl:int = (kslrom[slot.channel.f_num >> 6] << 2)
-                   - ((0x08 - slot.channel.block) << 5);
-        if (ksl < 0)
-        {
-            ksl = 0;
-        }
-        slot.eg_ksl = ksl & 0xFF; //int16 -> uint8
-    }
-
-    private function OPL3_EnvelopeUpdateRate(slot:opl3_slot):void
-    {
-        switch (slot.eg_gen)
-        {
-        case envelope_gen_num_off:
-        case envelope_gen_num_attack:
-            slot.eg_rate = OPL3_EnvelopeCalcRate(slot, slot.reg_ar);
-            break;
-        case envelope_gen_num_decay:
-            slot.eg_rate = OPL3_EnvelopeCalcRate(slot, slot.reg_dr);
-            break;
-        case envelope_gen_num_sustain:
-        case envelope_gen_num_release:
-            slot.eg_rate = OPL3_EnvelopeCalcRate(slot, slot.reg_rr);
-            break;
-        }
-    }
-    
-    private function OPL3_EnvelopeCalc(slot:opl3_slot):void
-    {
-        var rate_h:uint, rate_l:uint;
-        var inc:uint = 0;
-        var a:uint, b:uint, c:uint
-        rate_h = slot.eg_rate >> 2;
-        rate_l = slot.eg_rate & 3;
-        if (eg_incsh[rate_h] > 0)
-        {
-            if ((chip.timer & ((1 << eg_incsh[rate_h]) - 1)) == 0)
-            {
-                a = eg_incdesc[rate_h];
-                b = rate_l;
-                c = ((chip.timer) >> eg_incsh[rate_h]) & 0x07;
-                inc = eg_incstep[a*32 + b*8 + c];
-            }
-        }
-        else
-        {
-            a = eg_incdesc[rate_h];
-            b = rate_l;
-            c = chip.timer & 0x07;
-            inc = eg_incstep[a*32 + b*8 + c] << (-eg_incsh[rate_h]);
-        }
-        slot.eg_inc = inc;
-        slot.eg_out = slot.eg_rout + (slot.reg_tl << 2)
-                     + (slot.eg_ksl >> kslshift[slot.reg_ksl]) + slot.trem[0];
-        envelope_gen(slot);
+        //------------------
     }
     
     private function OPL3_EnvelopeKeyOn(slot:opl3_slot, type:uint):void
@@ -361,12 +335,15 @@ public class OPL3emu
     // Phase Generator
     //
 
-    private function OPL3_PhaseGenerate(slot:opl3_slot):void
+    [Inline]
+    private final function OPL3_PhaseGenerate(slot:opl3_slot):void
     {
+		var channel:opl3_channel = slot.channel;
+		
         var f_num:uint;
         var basefreq:uint;
 
-        f_num = slot.channel.f_num;
+        f_num = channel.f_num;
         if (slot.reg_vib)
         {
             var range:int;
@@ -391,21 +368,8 @@ public class OPL3emu
             }
             f_num += range;
         }
-        basefreq = (f_num << slot.channel.block) >> 1;
+        basefreq = (f_num << channel.block) >> 1;
         slot.pg_phase += (basefreq * mt[slot.reg_mult]) >> 1;
-    }
-
-    //
-    // Noise Generator
-    //
-
-    private function OPL3_NoiseGenerate():void
-    {
-        if (chip.noise & 0x01)
-        {
-            chip.noise ^= 0x800302;
-        }
-        chip.noise >>= 1;
     }
     
     private function OPL3_SlotWrite20(slot:opl3_slot, data:uint):void
@@ -459,7 +423,8 @@ public class OPL3emu
         }
     }
     
-    public function OPL3_SlotGeneratePhase(slot:opl3_slot, phase:uint):void
+    [Inline]
+    private final function OPL3_SlotGeneratePhase(slot:opl3_slot, phase:uint):void
     {
         var out:uint = 0;
         var neg:uint = 0;
@@ -481,7 +446,6 @@ public class OPL3emu
                 {
                     out = logsinrom[phase & 0xff];
                 }
-                slot.out[0] = OPL3_EnvelopeCalcExp(out + (envelope << 3)) ^ neg;
             break;
             case 1:
                 phase &= 0x3ff;
@@ -497,7 +461,6 @@ public class OPL3emu
                 {
                     out = logsinrom[phase & 0xff];
                 }
-                slot.out[0] = OPL3_EnvelopeCalcExp(out + (envelope << 3));
             break;
             case 2:
                 phase &= 0x3ff;
@@ -509,7 +472,6 @@ public class OPL3emu
                 {
                     out = logsinrom[phase & 0xff];
                 }
-                slot.out[0] = OPL3_EnvelopeCalcExp(out + (envelope << 3));
             break;
             case 3:
                 phase &= 0x3ff;
@@ -521,7 +483,6 @@ public class OPL3emu
                 {
                     out = logsinrom[phase & 0xff];
                 }
-                slot.out[0] = OPL3_EnvelopeCalcExp(out + (envelope << 3));
             break;
             case 4:
                 phase &= 0x3ff;
@@ -541,7 +502,6 @@ public class OPL3emu
                 {
                     out = logsinrom[(phase << 1) & 0xff];
                 }
-                slot.out[0] = OPL3_EnvelopeCalcExp(out + (envelope << 3)) ^ neg;
             break;
             case 5:
                 phase &= 0x3ff;
@@ -557,7 +517,6 @@ public class OPL3emu
                 {
                     out = logsinrom[(phase << 1) & 0xff];
                 }
-                slot.out[0] = OPL3_EnvelopeCalcExp(out + (envelope << 3));
             break;
             case 6:
                 phase &= 0x3ff;
@@ -565,7 +524,6 @@ public class OPL3emu
                 {
                     neg = ~0; //~0
                 }
-                slot.out[0] = OPL3_EnvelopeCalcExp(envelope << 3) ^ neg;
             break;
             case 7:
                 phase &= 0x3ff;
@@ -575,27 +533,31 @@ public class OPL3emu
                     phase = (phase & 0x1ff) ^ 0x1ff;
                 }
                 out = phase << 3;
-                slot.out[0] = OPL3_EnvelopeCalcExp(out + (envelope << 3)) ^ neg;
             break;
-            slot.out[0] = slot.out[0];
         }
+        
+        var level:uint = out + (envelope << 3)
+        if (level > 0x1fff)
+        {
+            level = 0x1fff;
+        }
+        slot.out[0] = (((exprom[(level & 0xff) ^ 0xff] | 0x400) << 1) >> (level >> 8)) ^ neg;
     }
     
-    private function OPL3_SlotGenerate(slot:opl3_slot):void
+    [Inline]
+    private final function OPL3_SlotGenerate(slot:opl3_slot):void
     {
         OPL3_SlotGeneratePhase(slot, (slot.pg_phase >> 9) + slot.mod[0]);
     }
-
-    private function OPL3_SlotGenerateZM(slot:opl3_slot):void
-    {
-        OPL3_SlotGeneratePhase(slot, (slot.pg_phase >> 9));
-    }
     
-    private function OPL3_SlotCalcFB(slot:opl3_slot):void
+    [Inline]
+    private final function OPL3_SlotCalcFB(slot:opl3_slot):void
     {
-        if (slot.channel.fb != 0x00)
+		var channel:opl3_channel = slot.channel;
+		
+        if (channel.fb != 0x00)
         {
-            slot.fbmod[0] = (slot.prout + slot.out[0]) >> (0x09 - slot.channel.fb);
+            slot.fbmod[0] = (slot.prout + slot.out[0]) >> (0x09 - channel.fb);
         }
         else
         {
@@ -690,10 +652,11 @@ public class OPL3emu
         {
             for (chnum = 6; chnum < 9; chnum++)
             {
-                chip.channel[chnum].chtype = ch_2op;
-                OPL3_ChannelSetupAlg(chip.channel[chnum]);
-                OPL3_EnvelopeKeyOff(chip.channel[chnum].slots0, egk_drum);
-                OPL3_EnvelopeKeyOff(chip.channel[chnum].slots1, egk_drum);
+				var channel:opl3_channel = chip.channel[chnum];
+                channel.chtype = ch_2op;
+                OPL3_ChannelSetupAlg(channel);
+                OPL3_EnvelopeKeyOff(channel.slots0, egk_drum);
+                OPL3_EnvelopeKeyOff(channel.slots1, egk_drum);
             }
         }
     }
@@ -954,8 +917,8 @@ public class OPL3emu
         }
     }
     
-    //TODO: obsolete
-    private function OPL3_ClipSample(sample:int):int
+    [Inline]
+    private final function OPL3_ClipSample(sample:int):int
     {
         if (sample > 32767)
         {
@@ -968,7 +931,8 @@ public class OPL3emu
         return sample;
     }
     
-    private function OPL3_GenerateRhythm1():void
+    [Inline]
+    private final function OPL3_GenerateRhythm1():void
     {
         var channel6:opl3_channel;
         var channel7:opl3_channel;
@@ -993,10 +957,12 @@ public class OPL3emu
               | (0x34 << ((phasebit ^ (chip.noise & 0x01)) << 1));
         OPL3_SlotGeneratePhase(channel7.slots0, phase);
         //tt
-        OPL3_SlotGenerateZM(channel8.slots0);
+        OPL3_SlotGeneratePhase(channel8.slots0, (channel8.slots0.pg_phase >> 9));
+
     }
     
-    private function OPL3_GenerateRhythm2():void
+    [Inline]
+    private final function OPL3_GenerateRhythm2():void
     {
         var channel6:opl3_channel;
         var channel7:opl3_channel;
@@ -1023,183 +989,47 @@ public class OPL3emu
         phase = 0x100 | (phasebit << 9);
         OPL3_SlotGeneratePhase(channel8.slots1, phase);
     }
-
-    //TODO: obsolete
-    private function uint16ToInt32(x:uint):int
-    {
-        if (x & 0x8000)
-        {
-            x |= 0xFFFF0000;
-        }
-        return x;
-    }
-    
-    private function OPL3_Generate():void
-    {
-        var ii:uint;
-        var jj:uint;
-        var accm:int;
-
-        chip.samples1 = OPL3_ClipSample(chip.mixbuff1);
-
-        for (ii = 0; ii < 12; ii++)
-        {
-            OPL3_SlotCalcFB(chip.slot[ii]);
-            OPL3_PhaseGenerate(chip.slot[ii]);
-            OPL3_EnvelopeCalc(chip.slot[ii]);
-            OPL3_SlotGenerate(chip.slot[ii]);
-        }
-
-        for (ii = 12; ii < 15; ii++)
-        {
-            OPL3_SlotCalcFB(chip.slot[ii]);
-            OPL3_PhaseGenerate(chip.slot[ii]);
-            OPL3_EnvelopeCalc(chip.slot[ii]);
-        }
-
-        if (chip.rhy & 0x20)
-        {
-            OPL3_GenerateRhythm1();
-        }
-        else
-        {
-            OPL3_SlotGenerate(chip.slot[12]);
-            OPL3_SlotGenerate(chip.slot[13]);
-            OPL3_SlotGenerate(chip.slot[14]);
-        }
-
-        chip.mixbuff0 = 0;
-        for (ii = 0; ii < 18; ii++)
-        {
-            accm = 0;
-            accm += chip.channel[ii].out0[0];
-            accm += chip.channel[ii].out1[0];
-            accm += chip.channel[ii].out2[0];
-            accm += chip.channel[ii].out3[0];
-            chip.mixbuff0 += accm & chip.channel[ii].cha; //uint16 -> int16
-        }
-
-        for (ii = 15; ii < 18; ii++)
-        {
-            OPL3_SlotCalcFB(chip.slot[ii]);
-            OPL3_PhaseGenerate(chip.slot[ii]);
-            OPL3_EnvelopeCalc(chip.slot[ii]);
-        }
-
-        if (chip.rhy & 0x20)
-        {
-            OPL3_GenerateRhythm2();
-        }
-        else
-        {
-            OPL3_SlotGenerate(chip.slot[15]);
-            OPL3_SlotGenerate(chip.slot[16]);
-            OPL3_SlotGenerate(chip.slot[17]);
-        }
-
-        chip.samples0 = OPL3_ClipSample(chip.mixbuff0);
-
-        for (ii = 18; ii < 33; ii++)
-        {
-            OPL3_SlotCalcFB(chip.slot[ii]);
-            OPL3_PhaseGenerate(chip.slot[ii]);
-            OPL3_EnvelopeCalc(chip.slot[ii]);
-            OPL3_SlotGenerate(chip.slot[ii]);
-        }
-
-        chip.mixbuff1 = 0;
-        for (ii = 0; ii < 18; ii++)
-        {
-            accm = 0;
-            accm += chip.channel[ii].out0[0];
-            accm += chip.channel[ii].out1[0];
-            accm += chip.channel[ii].out2[0];
-            accm += chip.channel[ii].out3[0];
-            chip.mixbuff1 += accm & chip.channel[ii].chb; //uint16 -> int16
-        }
-
-        for (ii = 33; ii < 36; ii++)
-        {
-            OPL3_SlotCalcFB(chip.slot[ii]);
-            OPL3_PhaseGenerate(chip.slot[ii]);
-            OPL3_EnvelopeCalc(chip.slot[ii]);
-            OPL3_SlotGenerate(chip.slot[ii]);
-        }
-
-        OPL3_NoiseGenerate();
-
-        if ((chip.timer & 0x3f) == 0x3f)
-        {
-            chip.tremolopos = (chip.tremolopos + 1) % 210;
-        }
-        if (chip.tremolopos < 105)
-        {
-            chip.tremolo[0] = chip.tremolopos >> chip.tremoloshift;
-        }
-        else
-        {
-            chip.tremolo[0] = (210 - chip.tremolopos) >> chip.tremoloshift;
-        }
-
-        if ((chip.timer & 0x3ff) == 0x3ff)
-        {
-            chip.vibpos = (chip.vibpos + 1) & 7;
-        }
-
-        chip.timer++;
-
-        /*
-        while (chip->writebuf[chip->writebuf_cur].time <= chip->writebuf_samplecnt)
-        {
-            if (!(chip->writebuf[chip->writebuf_cur].reg & 0x200))
-            {
-                break;
-            }
-            chip->writebuf[chip->writebuf_cur].reg &= 0x1ff;
-            OPL3_WriteReg(chip, chip->writebuf[chip->writebuf_cur].reg,
-                          chip->writebuf[chip->writebuf_cur].data);
-            chip->writebuf_cur = (chip->writebuf_cur + 1) % OPL_WRITEBUF_SIZE;
-        }
-        chip->writebuf_samplecnt++;
-        */
-    }
     
     public function Reset(samplerate:uint):void
     {
         var slotnum:uint;
         var channum:uint;
+		var slot:opl3_slot;
+		var channel:opl3_channel;
 
         chip.MEMSET_0();
         for (slotnum = 0; slotnum < 36; slotnum++)
         {
-            chip.slot[slotnum].mod = chip.zeromod;
-            chip.slot[slotnum].eg_rout = 0x1ff;
-            chip.slot[slotnum].eg_out = 0x1ff;
-            chip.slot[slotnum].eg_gen = envelope_gen_num_off;
-            chip.slot[slotnum].trem = chip.zeromod;
+			slot = chip.slot[slotnum];
+            slot.mod = chip.zeromod;
+            slot.eg_rout = 0x1ff;
+            slot.eg_out = 0x1ff;
+            slot.eg_gen = envelope_gen_num_off;
+            slot.trem = chip.zeromod;
         }
         for (channum = 0; channum < 18; channum++)
         {
-            chip.channel[channum].slots0 = chip.slot[ch_slot[channum]];
-            chip.channel[channum].slots1 = chip.slot[ch_slot[channum] + 3];
-            chip.slot[ch_slot[channum]].channel = chip.channel[channum];
-            chip.slot[ch_slot[channum] + 3].channel = chip.channel[channum];
+			channel = chip.channel[channum];
+            channel.slots0 = chip.slot[ch_slot[channum]];
+            channel.slots1 = chip.slot[ch_slot[channum] + 3];
+            chip.slot[ch_slot[channum]].channel = channel;
+            chip.slot[ch_slot[channum] + 3].channel = channel;
             if ((channum % 9) < 3)
             {
-                chip.channel[channum].pair = chip.channel[channum + 3];
+                channel.pair = chip.channel[channum + 3];
             }
             else if ((channum % 9) < 6)
             {
-                chip.channel[channum].pair = chip.channel[channum - 3];
+                channel.pair = chip.channel[channum - 3];
             }
-            chip.channel[channum].out0 = chip.zeromod;
-            chip.channel[channum].out1 = chip.zeromod;
-            chip.channel[channum].out2 = chip.zeromod;
-            chip.channel[channum].out3 = chip.zeromod;
-            chip.channel[channum].chtype = ch_2op;
-            chip.channel[channum].cha = ~0;
-            chip.channel[channum].chb = ~0;
-            OPL3_ChannelSetupAlg(chip.channel[channum]);
+            channel.out0 = chip.zeromod;
+            channel.out1 = chip.zeromod;
+            channel.out2 = chip.zeromod;
+            channel.out3 = chip.zeromod;
+            channel.chtype = ch_2op;
+            channel.cha = ~0;
+            channel.chb = ~0;
+            OPL3_ChannelSetupAlg(channel);
         }
         chip.noise = 0x306600;
         chip.rateratio = (samplerate << RSM_FRAC) / OPL3_SAMPRATE;
@@ -1349,7 +1179,159 @@ void OPL3_WriteRegBuffered(opl3_chip *chip, Bit16u reg, Bit8u v)
             {
                 chip.oldsamples0 = chip.samples0;
                 chip.oldsamples1 = chip.samples1;
-                OPL3_Generate();
+				
+				//------------
+				var ii:uint;
+				var jj:uint;
+				var accm:int;
+				var slot:opl3_slot;
+				var channel:opl3_channel;
+
+				chip.samples1 = OPL3_ClipSample(chip.mixbuff1);
+
+                ii = 12;
+				while (--ii > -1)
+				{
+					slot = chip.slot[ii];
+					OPL3_SlotCalcFB(slot);
+					OPL3_PhaseGenerate(slot);
+					OPL3_EnvelopeCalc(slot);
+                    OPL3_SlotGeneratePhase(slot, (slot.pg_phase >> 9) + slot.mod[0]);
+				}
+
+                ii = 15;
+				while (--ii > 11)
+				{
+					slot = chip.slot[ii];
+					OPL3_SlotCalcFB(slot);
+					OPL3_PhaseGenerate(slot);
+					OPL3_EnvelopeCalc(slot);
+				}
+
+				if (chip.rhy & 0x20)
+				{
+					OPL3_GenerateRhythm1();
+				}
+				else
+				{
+					OPL3_SlotGenerate(chip.slot[12]);
+					OPL3_SlotGenerate(chip.slot[13]);
+					OPL3_SlotGenerate(chip.slot[14]);
+				}
+
+				chip.mixbuff0 = 0;
+                ii = 18;
+				while (--ii > -1)
+				{
+					channel = chip.channel[ii];
+					accm = 0;
+					accm += channel.out0[0];
+					accm += channel.out1[0];
+					accm += channel.out2[0];
+					accm += channel.out3[0];
+					chip.mixbuff0 += accm & channel.cha; //uint16 -> int16
+				}
+
+                ii = 18;
+				while (--ii > 14)
+				{
+					slot = chip.slot[ii];
+					OPL3_SlotCalcFB(slot);
+					OPL3_PhaseGenerate(slot);
+					OPL3_EnvelopeCalc(slot);
+				}
+
+				if (chip.rhy & 0x20)
+				{
+					OPL3_GenerateRhythm2();
+				}
+				else
+				{
+					OPL3_SlotGenerate(chip.slot[15]);
+					OPL3_SlotGenerate(chip.slot[16]);
+					OPL3_SlotGenerate(chip.slot[17]);
+				}
+
+				chip.samples0 = OPL3_ClipSample(chip.mixbuff0);
+
+                ii = 33;
+				while (--ii > 17)
+				{
+					slot = chip.slot[ii];
+					OPL3_SlotCalcFB(slot);
+					OPL3_PhaseGenerate(slot);
+					OPL3_EnvelopeCalc(slot);
+                    OPL3_SlotGeneratePhase(slot, (slot.pg_phase >> 9) + slot.mod[0]);
+				}
+
+				chip.mixbuff1 = 0;
+                ii = 18;
+				while (--ii > -1)
+				{
+					channel = chip.channel[ii];
+					accm = 0;
+					accm += channel.out0[0];
+					accm += channel.out1[0];
+					accm += channel.out2[0];
+					accm += channel.out3[0];
+					chip.mixbuff1 += accm & channel.chb; //uint16 -> int16
+				}
+
+                ii = 36;
+				while (--ii > 32)
+				{
+					slot = chip.slot[ii];
+					OPL3_SlotCalcFB(slot);
+					OPL3_PhaseGenerate(slot);
+					OPL3_EnvelopeCalc(slot);
+                    OPL3_SlotGeneratePhase(slot, (slot.pg_phase >> 9) + slot.mod[0]);
+				}
+
+				//OPL3_NoiseGenerate();
+                //---------------------
+                if (chip.noise & 0x01)
+                {
+                    chip.noise ^= 0x800302;
+                }
+                chip.noise >>= 1;
+                //---------------------
+
+				if ((chip.timer & 0x3f) == 0x3f)
+				{
+					chip.tremolopos = (chip.tremolopos + 1) % 210;
+				}
+				if (chip.tremolopos < 105)
+				{
+					chip.tremolo[0] = chip.tremolopos >> chip.tremoloshift;
+				}
+				else
+				{
+					chip.tremolo[0] = (210 - chip.tremolopos) >> chip.tremoloshift;
+				}
+
+				if ((chip.timer & 0x3ff) == 0x3ff)
+				{
+					chip.vibpos = (chip.vibpos + 1) & 7;
+				}
+
+				chip.timer++;
+
+				/*
+				while (chip->writebuf[chip->writebuf_cur].time <= chip->writebuf_samplecnt)
+				{
+					if (!(chip->writebuf[chip->writebuf_cur].reg & 0x200))
+					{
+						break;
+					}
+					chip->writebuf[chip->writebuf_cur].reg &= 0x1ff;
+					OPL3_WriteReg(chip, chip->writebuf[chip->writebuf_cur].reg,
+								  chip->writebuf[chip->writebuf_cur].data);
+					chip->writebuf_cur = (chip->writebuf_cur + 1) % OPL_WRITEBUF_SIZE;
+				}
+				chip->writebuf_samplecnt++;
+				*/
+				//------------
+				
                 chip.samplecnt -= chip.rateratio;
             }
             s0 = ((chip.oldsamples0 * (chip.rateratio - chip.samplecnt)
@@ -1465,6 +1447,11 @@ class opl3_chip
         slot = new Vector.<opl3_slot>(36, true);        for(i=0; i<36; i++) slot[i] = new opl3_slot();
         tremolo = new Vector.<int>(1, true);
         zeromod = new Vector.<int>(1, true);
+        
+        channel.fixed = true;
+        slot.fixed = true;
+        tremolo.fixed = true;
+        zeromod.fixed = true;
     }
 }
 
@@ -1565,6 +1552,8 @@ class opl3_slot
     {
         out = new Vector.<int>(1, true);
         fbmod = new Vector.<int>(1, true);
+        out.fixed = true;
+        fbmod.fixed = true;
     }
 }
 
